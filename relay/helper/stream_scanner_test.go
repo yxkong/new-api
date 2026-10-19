@@ -286,6 +286,84 @@ func TestStreamScannerHandler_DataWithExtraSpaces(t *testing.T) {
 	assert.Equal(t, "{\"trimmed\":true}", got)
 }
 
+func TestStreamScannerHandler_BareDoneTerminates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		body      string
+		want      []string
+		wantCount int
+	}{
+		{
+			name:      "prefixed",
+			body:      "data: {\"id\":1}\ndata: [DONE]\ndata: {\"id\":2}\n",
+			want:      []string{`{"id":1}`},
+			wantCount: 1,
+		},
+		{
+			name:      "data-no-space",
+			body:      "data: {\"id\":1}\ndata:[DONE]\ndata: {\"id\":2}\n",
+			want:      []string{`{"id":1}`},
+			wantCount: 1,
+		},
+		{
+			name:      "bare",
+			body:      "data: {\"id\":1}\n[DONE]\ndata: {\"id\":2}\n",
+			want:      []string{`{"id":1}`},
+			wantCount: 1,
+		},
+		{
+			name:      "bare-only",
+			body:      "[DONE]\n",
+			wantCount: 0,
+		},
+		{
+			name:      "trailing-space",
+			body:      "data: {\"id\":1}\n[DONE] \ndata: {\"id\":2}\n",
+			want:      []string{`{"id":1}`},
+			wantCount: 1,
+		},
+		{
+			name:      "leading-space",
+			body:      "data: {\"id\":1}\n [DONE]\ndata: {\"id\":2}\n",
+			want:      []string{`{"id":1}`},
+			wantCount: 1,
+		},
+		{
+			name:      "prefix-junk",
+			body:      "[DONE]extra\n",
+			wantCount: 0,
+		},
+		{
+			name:      "trimmed-data",
+			body:      "data:   {\"trimmed\":true}  \ndata: [DONE]\n",
+			want:      []string{`{"trimmed":true}`},
+			wantCount: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, resp, info := setupStreamTest(t, strings.NewReader(tc.body))
+			var got []string
+			StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+				got = append(got, data)
+			})
+			if len(tc.want) == 0 {
+				require.Empty(t, got)
+			} else {
+				require.Equal(t, tc.want, got)
+			}
+			require.NotNil(t, info.StreamStatus)
+			require.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+			assert.Equal(t, tc.wantCount, info.ReceivedResponseCount)
+		})
+	}
+}
+
 // TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns pins the
 // disconnect contract: when the client goes away, the handler must return
 // promptly (all goroutines joined, so the gin.Context can never leak into a
