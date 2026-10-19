@@ -263,6 +263,14 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			data := scanner.Text()
 			logger.LogDebug(c, "stream scanner data: %s", data)
 
+			// A bare [DONE] line has no data: prefix. Slicing data[5:] would
+			// turn it into "]" and emit that as a frame.
+			if strings.HasPrefix(strings.TrimSpace(data), "[DONE]") {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+				logger.LogDebug(c, "received [DONE], stopping scanner")
+				return
+			}
+
 			if len(data) < 6 {
 				continue
 			}
