@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -257,36 +258,21 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
-		// Use channel-specific lock to ensure thread-safe polling
-
-		channelInfo, err := CacheGetChannelInfo(channel.Id)
-		if err != nil {
-			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
-		}
-		defer func() {
-			if common.DebugEnabled {
-				logger.LogDebug(nil, "channel %d polling index: %d", channel.Id, channel.ChannelInfo.MultiKeyPollingIndex)
-			}
-			if !common.MemoryCacheEnabled {
-				_ = channel.SaveChannelInfo()
-			} else {
-				// CacheUpdateChannel(channel)
-			}
-		}()
-		// Start from the saved polling index and look for the next enabled key
-		start := channelInfo.MultiKeyPollingIndex
-		if start < 0 || start >= len(keys) {
+		cursor := pollingCursor(channel.Id)
+		start := int(cursor.Load())
+		if start >= len(keys) {
 			start = 0
 		}
 		for i := range keys {
 			idx := (start + i) % len(keys)
 			if getStatus(idx) == common.ChannelStatusEnabled {
-				// update polling index for next call (point to the next position)
-				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
+				cursor.Store(uint32((idx + 1) % len(keys)))
+				if common.DebugEnabled {
+					logger.LogDebug(nil, "channel %d polling index: %d", channel.Id, int(cursor.Load()))
+				}
 				return keys[idx], idx, nil
 			}
 		}
-		// Fallback – should not happen, but return first enabled key
 		return keys[enabledIdx[0]], enabledIdx[0], nil
 	default:
 		// Unknown mode, default to first enabled key (or original key string)
@@ -641,10 +627,32 @@ func (channel *Channel) Delete() error {
 
 var channelStatusLock sync.Mutex
 
-// channelPollingLocks stores locks for each channel.id to ensure thread-safe polling
+// channelPollingLocks stores locks for each channel.id to ensure thread-safe polling.
 var channelPollingLocks sync.Map
 
-// GetChannelPollingLock returns or creates a mutex for the given channel ID
+// channelPollingCursors stores the live multi-key polling index outside the
+// channel cache object. Key is the channel id.
+var channelPollingCursors sync.Map // channel id (int) -> *atomic.Uint32
+
+func pollingCursor(channelID int) *atomic.Uint32 {
+	if v, ok := channelPollingCursors.Load(channelID); ok {
+		return v.(*atomic.Uint32)
+	}
+	c := new(atomic.Uint32)
+	actual, _ := channelPollingCursors.LoadOrStore(channelID, c)
+	return actual.(*atomic.Uint32)
+}
+
+// GetChannelPollingLock returns or creates a mutex for the given channel ID.
+//
+// Lock order:
+//  1. channelStatusLock (UpdateChannelStatus, only while the memory cache is on)
+//     may be acquired before this polling lock.
+//  2. The polling lock must not wrap channelSyncLock. Key selection must not call
+//     CacheGetChannelInfo, CacheGetChannel, or CacheUpdateChannelStatus.
+//  3. channelSyncLock must not wrap the polling lock. InitChannelCache must not
+//     call GetNextEnabledKey or GetChannelPollingLock.
+//  4. channelSyncLock must be released before InvalidatePricingCache.
 func GetChannelPollingLock(channelId int) *sync.Mutex {
 	if lock, exists := channelPollingLocks.Load(channelId); exists {
 		return lock.(*sync.Mutex)

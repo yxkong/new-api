@@ -80,23 +80,26 @@ func InitChannelCache() {
 
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
-	//channelsIDM = newChannelId2channel
-	for i, channel := range newChannelId2channel {
+	for _, channel := range newChannelId2channel {
 		if channel.ChannelInfo.IsMultiKey {
 			channel.Keys = channel.GetKeys()
-			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
-				if oldChannel, ok := channelsIDM[i]; ok {
-					// 存在旧的渠道，如果是多key且轮询，保留轮询索引信息
-					if oldChannel.ChannelInfo.IsMultiKey && oldChannel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
-						channel.ChannelInfo.MultiKeyPollingIndex = oldChannel.ChannelInfo.MultiKeyPollingIndex
-					}
-				}
-			}
 		}
 	}
 	channelsIDM = newChannelId2channel
 	channel2advancedCustomConfig = newChannel2advancedCustomConfig
+	liveChannelIDs := make(map[int]struct{}, len(newChannelId2channel))
+	for id := range newChannelId2channel {
+		liveChannelIDs[id] = struct{}{}
+	}
 	channelSyncLock.Unlock()
+	// Cursor reaping stays outside channelSyncLock and does not take the polling lock.
+	channelPollingCursors.Range(func(key, _ any) bool {
+		channelID := key.(int)
+		if _, live := liveChannelIDs[channelID]; !live {
+			channelPollingCursors.Delete(channelID)
+		}
+		return true
+	})
 	// Lock ordering: InvalidatePricingCache acquires updatePricingLock, and
 	// GetPricing (holding updatePricingLock) nests channelSyncLock.RLock via
 	// loadPricingAdvancedCustomConfigs. channelSyncLock MUST be released before
