@@ -114,10 +114,16 @@ func OpenAIChatRequestToClaudeMessages(c context.Context, info convmeta.Meta, te
 		switch stop := textRequest.Stop.(type) {
 		case string:
 			claudeRequest.StopSequences = []string{stop}
+		case []string:
+			claudeRequest.StopSequences = stop
 		case []any:
-			stopSequences := make([]string, 0)
+			stopSequences := make([]string, 0, len(stop))
 			for _, item := range stop {
-				stopSequences = append(stopSequences, item.(string))
+				s, ok := item.(string)
+				if !ok {
+					continue
+				}
+				stopSequences = append(stopSequences, s)
 			}
 			claudeRequest.StopSequences = stopSequences
 		}

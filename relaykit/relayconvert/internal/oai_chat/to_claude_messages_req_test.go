@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,6 +77,58 @@ func TestOpenAIChatRequestToClaudeMessagesNormalizesToolInputSchema(t *testing.T
 			require.True(t, ok)
 			assert.Equal(t, "get_current_time", tool.Name)
 			assert.Equal(t, tt.wantSchema, tool.InputSchema)
+		})
+	}
+}
+
+func TestOpenAIChatRequestToClaudeMessagesStop(t *testing.T) {
+	var jsonStop any
+	require.NoError(t, kitutil.Unmarshal([]byte(`["END",1,null,""]`), &jsonStop))
+
+	maxTokens := uint(16)
+	tests := []struct {
+		name string
+		stop any
+		want []string
+	}{
+		{name: "string", stop: "END", want: []string{"END"}},
+		{name: "empty-string", stop: "", want: []string{""}},
+		{name: "any-strings", stop: []any{"END", ""}, want: []string{"END", ""}},
+		{name: "typed-slice", stop: []string{"END", "STOP"}, want: []string{"END", "STOP"}},
+		{name: "typed-slice-one", stop: []string{"END"}, want: []string{"END"}},
+		{name: "json-array", stop: jsonStop, want: []string{"END", ""}},
+		{name: "go-int", stop: []any{"END", 1}, want: []string{"END"}},
+		{name: "mixed-non-string", stop: []any{"END", 1, false, nil}, want: []string{"END"}},
+		{name: "only-non-string", stop: []any{1, nil}, want: []string{}},
+		{name: "empty-array", stop: []any{}, want: []string{}},
+		{name: "nil", stop: nil, want: nil},
+		{name: "number", stop: float64(1), want: nil},
+		{name: "bool", stop: true, want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := dto.GeneralOpenAIRequest{
+				Model:     "claude-test",
+				MaxTokens: &maxTokens,
+				Messages: []dto.Message{
+					{Role: "user", Content: "hi"},
+				},
+				Stop: tt.stop,
+			}
+
+			var got *dto.ClaudeRequest
+			var err error
+			require.NotPanics(t, func() {
+				got, err = OpenAIChatRequestToClaudeMessages(context.Background(), nil, req)
+			})
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got.StopSequences)
+			if tt.name == "empty-string" {
+				raw, marshalErr := kitutil.Marshal(got)
+				require.NoError(t, marshalErr)
+				assert.Contains(t, string(raw), `"stop_sequences":[""]`)
+			}
 		})
 	}
 }
